@@ -39,7 +39,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define SampleSize 65536
+#define SampleSize 8192
 #define BufferSize 2048
 
 /* USER CODE END PD */
@@ -61,7 +61,7 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
-#define ADC_VAL_SIZE 64
+#define ADC_VAL_SIZE 32
 uint32_t adcVal[ADC_VAL_SIZE];
 uint32_t adcFlush[ADC_VAL_SIZE];
 double buffer[BufferSize];
@@ -431,7 +431,7 @@ int main(void)
 	     double totalAverage2 = 0.0;
 	     processAndSaveData("ADXL2_DATA.txt", "ADXL2_DATA_AVG_DIFF.txt", buffer, BufferSize, &totalAverage2);
 		 send_uart("FFT preparation complete!\r\n");
-		  fftFlag=1;
+		 fftFlag=1;
 
 	  }
 
