@@ -37,8 +37,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SampleSize 16384
-#define BufferSize 2048
+#define SampleSize 98304
+#define BufferSize 4096
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -52,12 +52,12 @@ DMA_HandleTypeDef hdma_adc1;
 
 SPI_HandleTypeDef hspi1;
 
-TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart3;
 
 /* USER CODE BEGIN PV */
-#define ADC_VAL_SIZE 64
+#define ADC_VAL_SIZE 384
 uint32_t adcVal[ADC_VAL_SIZE] __attribute__ ((section(".nocache")));;
 uint32_t adcFlush[ADC_VAL_SIZE];
 double buffer[BufferSize];
@@ -65,24 +65,26 @@ unsigned long count=0;
 
 FATFS fs;
 FATFS *pfs;
-FIL fil1,fil2,fil3,fil4;
+FIL fil1,fil2,fil3,fil4,fil5,fil6,rawDataFile;
 FRESULT fresult;
 
 int bufferIndex = 0;
-char read_flag=0;
+volatile char read_flag=0;
 
 int fftbufferIndex = 0;
 #define FFT_BUFFER_SIZE 4096
-#define SAMPLING_RATE 500
+#define SAMPLING_RATE 1002.13
 arm_rfft_fast_instance_f32 fftHandler;
 float32_t fftBuffIn[FFT_BUFFER_SIZE];
 float32_t fftBuffOut[FFT_BUFFER_SIZE];
 float32_t outputfft_mag_xAxis_s1[FFT_BUFFER_SIZE/2];
 float32_t outputfft_mag_yAxis_s1[FFT_BUFFER_SIZE/2];
+float32_t outputfft_mag_zAxis_s1[FFT_BUFFER_SIZE/2];
 float32_t outputfft_mag_xAxis_s2[FFT_BUFFER_SIZE/2];
 float32_t outputfft_mag_yAxis_s2[FFT_BUFFER_SIZE/2];
-float32_t outputfft_mag_R_s2[FFT_BUFFER_SIZE/2];
+float32_t outputfft_mag_zAxis_s2[FFT_BUFFER_SIZE/2];
 float32_t outputfft_mag_R_s1[FFT_BUFFER_SIZE/2];
+float32_t outputfft_mag_R_s2[FFT_BUFFER_SIZE/2];
 uint8_t fftFlag=0;
 
 /* USER CODE END PV */
@@ -94,8 +96,8 @@ static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_SPI1_Init(void);
-static void MX_TIM2_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -131,42 +133,67 @@ void send_uart(const char *format, ...) {
     va_end(args);
 }
 
+void writeToFile(FIL* file, uint32_t* buffer, int size) {
+    char fileBuffer[1024];
+    char intBuffer[7];
+    int counter = 0;
+    char* fbPtr = &fileBuffer[0];
+    memset(fileBuffer, 0, 1024);
+    memset(intBuffer, 0, 7);
 
-void writeToFile(FIL* file1, FIL* file2, FIL* file3, FIL* file4, uint32_t* buffer, int size) {
-    FIL* files[4] = {file1, file2, file3, file4};
-    char fileBuffers[4][1024];
-    int counters[4] = {0, 0, 0, 0};
+    for (int i = 0; i < size; i ++) {
+        int c = snprintf(intBuffer, sizeof(intBuffer), "%d\n", (int)buffer[i]);
+        if (counter + c > 1024) {
+            f_puts(fileBuffer, file);
+            counter = 0;
+            memset(fileBuffer, 0, 1024);
+        }
+        memcpy(&fileBuffer[counter], intBuffer, c);
+        counter += c;
+        fbPtr += c;
+    }
+    if (counter > 0) {
+        f_puts(fileBuffer, file);
+
+ }
+}
+void distributeDataToFiles(FIL* rawDataFile, FIL* file1, FIL* file2, FIL* file3, FIL* file4, FIL* file5, FIL* file6) {
+    FIL* files[6] = {file1, file2, file3, file4, file5, file6};
+    char fileBuffers[6][1024];
+    int counters[6] = {0, 0, 0, 0, 0, 0};
     char intBuffer[7];
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 6; i++) {
         memset(fileBuffers[i], 0, 1024);
     }
 
-    for (int i = 0; i < size; i += 4) {
-        for (int j = 0; j < 4; j++) {
-            int c = snprintf(intBuffer, sizeof(intBuffer), "%d\n", (int)buffer[i + j]);
-            if (counters[j] + c > 1024) {
-                f_puts(fileBuffers[j], files[j]);
-                counters[j] = 0;
-                memset(fileBuffers[j], 0, 1024);
-            }
-            memcpy(&fileBuffers[j][counters[j]], intBuffer, c);
-            counters[j] += c;
+    char line[12];
+    int fileIndex = 0;
+
+    while (f_gets(line, sizeof(line), rawDataFile)) {
+        int c = snprintf(intBuffer, sizeof(intBuffer), "%s", line);
+        if (counters[fileIndex] + c > 1024) {
+            f_puts(fileBuffers[fileIndex], files[fileIndex]);
+            counters[fileIndex] = 0;
+            memset(fileBuffers[fileIndex], 0, 1024);
         }
+        memcpy(&fileBuffers[fileIndex][counters[fileIndex]], intBuffer, c);
+        counters[fileIndex] += c;
+
+        fileIndex = (fileIndex + 1) % 6;
     }
 
-    for (int j = 0; j < 4; j++) {
-        if (counters[j] > 0) {
-            f_puts(fileBuffers[j], files[j]);
+    for (int i = 0; i < 6; i++) {
+        if (counters[i] > 0) {
+            f_puts(fileBuffers[i], files[i]);
         }
     }
 }
-
-
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
  {
 	read_flag = 1;
 	memcpy(adcFlush,adcVal,ADC_VAL_SIZE*sizeof(uint32_t));
+	HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_12);
  }
 void processAndSaveData(const char *inputFileName, const char *outputFileName, double *buffer, int bufferSize, double *totalAverage) {
     FRESULT fresult;
@@ -181,7 +208,7 @@ void processAndSaveData(const char *inputFileName, const char *outputFileName, d
         return;
     }
 
-    fresult = f_open(&outputFile, outputFileName, FA_CREATE_ALWAYS | FA_WRITE);
+    fresult = f_open(&outputFile, outputFileName, FA_OPEN_ALWAYS | FA_WRITE);
     if (fresult != FR_OK) {
         send_uart("Error opening output file for writing.\r\n");
         f_close(&inputFile);
@@ -218,8 +245,9 @@ void processAndSaveData(const char *inputFileName, const char *outputFileName, d
     f_close(&inputFile);
     f_close(&outputFile);
 }
-void generate_resultant(const char *data_file1, const char *data_file2, const char *add_file) {
-    FIL fil1, fil2, add_fil;
+
+void generate_resultant(const char *data_file1, const char *data_file2, const char *data_file3, const char *add_file) {
+    FIL fil1, fil2, fil3, add_fil;
     FRESULT fresult;
 
     // Open the first data file for reading
@@ -237,40 +265,52 @@ void generate_resultant(const char *data_file1, const char *data_file2, const ch
         return;
     }
 
-    // Open the difference file for writing
-    fresult = f_open(&add_fil, add_file, FA_CREATE_ALWAYS | FA_WRITE);
+    // Open the third data file for reading
+    fresult = f_open(&fil3, data_file3, FA_OPEN_ALWAYS | FA_READ);
     if (fresult != FR_OK) {
-        send_uart("Error opening Resultant file for writing.\r\n");
+        send_uart("Error opening Z-Axis.\r\n");
         f_close(&fil1);
         f_close(&fil2);
         return;
     }
 
-    char line1[50], line2[50];
-    double mag1, mag2;
+    // Open the resultant file for writing
+    fresult = f_open(&add_fil, add_file, FA_OPEN_ALWAYS | FA_WRITE);
+    if (fresult != FR_OK) {
+        send_uart("Error opening Resultant file for writing.\r\n");
+        f_close(&fil1);
+        f_close(&fil2);
+        f_close(&fil3);
+        return;
+    }
 
-    while (f_gets(line1, sizeof(line1), &fil1) != NULL && f_gets(line2, sizeof(line2), &fil2) != NULL) {
+    char line1[50], line2[50], line3[50];
+    double mag1, mag2, mag3;
+
+    while (f_gets(line1, sizeof(line1), &fil1) != NULL && f_gets(line2, sizeof(line2), &fil2) != NULL && f_gets(line3, sizeof(line3), &fil3) != NULL) {
 
         sscanf(line1, "%lf", &mag1);
         sscanf(line2, "%lf", &mag2);
+        sscanf(line3, "%lf", &mag3);
 
         // Calculate and format sum of magnitudes
-        double add_mag = sqrt(mag1*mag1 + mag2*mag2);
+        double add_mag = sqrt(mag1*mag1 + mag2*mag2 + mag3*mag3);
 
         char add_mag_str[20]; // Adjust size as needed to accommodate formatted output
         snprintf(add_mag_str, sizeof(add_mag_str), "%.2f\n", (double)add_mag); // Convert double to string with formatting
         f_puts(add_mag_str, &add_fil);
         if (fresult != FR_OK) {
             send_uart("Error writing to resultant.txt.\r\n");
-
         }
     }
 
     // Close all files
     f_close(&fil1);
     f_close(&fil2);
+    f_close(&fil3);
     f_close(&add_fil);
 }
+
 void fftResults(const char *data_file, const char *fft_file, float *outputfft_mag, float *fftBuffIn, float *fftBuffOut) {
     FIL fil1, fil2;
     FRESULT fresult;
@@ -281,7 +321,7 @@ void fftResults(const char *data_file, const char *fft_file, float *outputfft_ma
         return;
     }
 
-    fresult = f_open(&fil2, fft_file, FA_CREATE_ALWAYS | FA_WRITE);
+    fresult = f_open(&fil2, fft_file, FA_OPEN_ALWAYS | FA_WRITE);
     if (fresult != FR_OK) {
         send_uart("Error opening FFT file for writing.\r\n");
         f_close(&fil1);
@@ -326,6 +366,69 @@ void fftResults(const char *data_file, const char *fft_file, float *outputfft_ma
     // Close both files
     f_close(&fil1);
     f_close(&fil2);
+}
+
+void generate_frequency_difference(const char *fft_file1, const char *fft_file2, const char *diff_file) {
+    FIL fil1, fil2, diff_fil;
+    FRESULT fresult;
+
+    // Open the first FFT file for reading
+    fresult = f_open(&fil1, fft_file1, FA_OPEN_ALWAYS | FA_READ);
+    if (fresult != FR_OK) {
+        send_uart("Error opening first FFT file for reading.\r\n");
+        return;
+    }
+
+    // Open the second FFT file for reading
+    fresult = f_open(&fil2, fft_file2, FA_OPEN_ALWAYS | FA_READ);
+    if (fresult != FR_OK) {
+        send_uart("Error opening second FFT file for reading.\r\n");
+        f_close(&fil1);
+        return;
+    }
+
+    // Open the difference file for writing
+    fresult = f_open(&diff_fil, diff_file, FA_OPEN_ALWAYS | FA_WRITE);
+    if (fresult != FR_OK) {
+        send_uart("Error opening difference file for writing.\r\n");
+        f_close(&fil1);
+        f_close(&fil2);
+        return;
+    }
+
+    char line1[50], line2[50];
+    float freq1, mag1, freq2, mag2;
+    float max_diff_mag = 0;
+    float max_diff_freq = 0;
+
+    while (f_gets(line1, sizeof(line1), &fil1) != NULL && f_gets(line2, sizeof(line2), &fil2) != NULL) {
+        // Parse frequency and magnitude from each file
+        sscanf(line1, "frequency %f: %f", &freq1, &mag1);
+        sscanf(line2, "frequency %f: %f", &freq2, &mag2);
+
+        // Calculate the difference in magnitudes
+        float diff_mag = mag2-mag1;
+
+        // Write the difference along with the frequency to the difference file
+        char diff_line[50];
+        snprintf(diff_line, sizeof(diff_line), "frequency %.2f: %.2f\n", freq1, diff_mag);
+        f_puts(diff_line, &diff_fil);
+
+        // Update the maximum difference and corresponding frequency
+        if (fabs(diff_mag) > max_diff_mag) {
+            max_diff_mag = fabs(diff_mag);
+            max_diff_freq = freq1;
+        }
+    }
+
+    // Close all files
+    f_close(&fil1);
+    f_close(&fil2);
+    f_close(&diff_fil);
+    // Print the maximum difference magnitude and corresponding frequency
+    char max_diff_message[100];
+    snprintf(max_diff_message, sizeof(max_diff_message), "Max difference magnitude: %.2f at frequency: %.2f\r\n", max_diff_mag, max_diff_freq);
+    send_uart(max_diff_message);
 }
 /* USER CODE END 0 */
 
@@ -372,15 +475,16 @@ int main(void)
   MX_DMA_Init();
   MX_ADC1_Init();
   MX_SPI1_Init();
-  MX_TIM2_Init();
   MX_FATFS_Init();
   MX_USART3_UART_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET , ADC_SINGLE_ENDED);
+HAL_ADCEx_Calibration_Start(&hadc1, ADC_CALIB_OFFSET ,ADC_SINGLE_ENDED);
 
 HAL_ADC_Start_DMA(&hadc1, adcVal, ADC_VAL_SIZE);
 
-HAL_TIM_Base_Start(&htim2);
+HAL_TIM_Base_Start(&htim3);
+
 arm_rfft_fast_init_f32(&fftHandler, FFT_BUFFER_SIZE);
 fresult = f_mount(&fs, "", 0);
    	  if (fresult != FR_OK) {
@@ -388,19 +492,9 @@ fresult = f_mount(&fs, "", 0);
    	  } else {
    		  send_uart("\n\rSD card MOUNTED...\r\n");
 
-   		  unlinkFile("/xAxis.txt");
-   		  unlinkFile("/Resultant.txt");
-   		  unlinkFile("/yAxis.txt");
-   		  unlinkFile("/zAxis.txt");
+   		  fresult = f_open(&rawDataFile, "rawData.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+   		  send_uart("rawData.txt created.\r\n");
 
-   		  fresult = f_open(&fil1, "xAxis_sensor1.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
-   		  send_uart("xAxis_sensor1.txt created.\r\n");
-   		  fresult = f_open(&fil2, "yAxis_sensor1.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
-   		  send_uart("yAxis_sensor1.txt created.\r\n");
-   		  fresult = f_open(&fil3, "xAxis_sensor2.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
-   		  send_uart("xAxis_sensor2.txt created.\r\n");
-   		  fresult = f_open(&fil4, "yAxis_sensor2.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
-  		  send_uart("yAxis_sensor2.txt created.\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -412,55 +506,99 @@ fresult = f_mount(&fs, "", 0);
     /* USER CODE BEGIN 3 */
 	  if (read_flag)
 	  	 	  {
-	  	 		  writeToFile(&fil1, &fil2, &fil3, &fil4, adcFlush, ADC_VAL_SIZE);
+	  	 		  writeToFile(&rawDataFile, adcFlush, ADC_VAL_SIZE);
 	  	 		  count+=ADC_VAL_SIZE;
 	  	 		  read_flag = 0;
 	  	 	  }
 	  	 	  if (count >= SampleSize)
 	  	 	  {
 	  	 		  HAL_ADC_Stop_DMA(&hadc1);
-	  	 		  HAL_TIM_Base_Stop(&htim2);
-	  	 		  f_close(&fil1);
-	  	 		  f_close(&fil2);
-	  	 		  f_close(&fil3);
-	  	 		  f_close(&fil4);
+	  	 		  HAL_TIM_Base_Stop(&htim3);
+	  	 		  f_close(&rawDataFile);
 	  	 		  send_uart("Data acquisition complete!\r\n");
 
-	  	 		  generate_resultant("xAxis_sensor1.txt", "yAxis_sensor1.txt", "Resultant_sensor1.txt");
+	  	 		  fresult = f_open(&rawDataFile, "rawData.txt",FA_READ);
 
-	  	 		  generate_resultant("xAxis_sensor2.txt", "yAxis_sensor2.txt", "Resultant_sensor2.txt");
+	  	 		  fresult = f_open(&fil1, "xAxisS1.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	 		  send_uart("xAxis.txt created.\r\n");
+
+	  	 		  fresult = f_open(&fil2, "yAxisS1.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	   		  send_uart("yAxis.txt created.\r\n");
+
+	  	   		  fresult = f_open(&fil3, "zAxisS1.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	   		  send_uart("zAxis.txt created.\r\n");
+
+	  	   		  fresult = f_open(&fil4, "xAxisS2.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	  		  send_uart("xAxis_sensor2.txt created.\r\n");
+
+	  	   		  fresult = f_open(&fil5, "yAxisS2.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	  		  send_uart("yAxis_sensor2.txt created.\r\n");
+
+	  	   		  fresult = f_open(&fil6, "zAxisS2.txt", FA_OPEN_ALWAYS | FA_READ | FA_WRITE);
+	  	  		  send_uart("zAxis_sensor2.txt created.\r\n");
+
+	  	  		  distributeDataToFiles(&rawDataFile, &fil1, &fil2, &fil3, &fil4, &fil5, &fil6);
+	  	  		  f_close(&rawDataFile);
+	  	  		  f_close(&fil1);
+	  	  		  f_close(&fil2);
+	  	  		  f_close(&fil3);
+	  	  	  	  f_close(&fil4);
+	  	  	  	  f_close(&fil5);
+	  	  	  	  f_close(&fil6);
+
+
+	  	 		  generate_resultant("xAxisS1.txt", "yAxisS1.txt", "zAxisS1.txt", "ResultantS1.txt");
+
+	  	 		  generate_resultant("xAxisS2.txt", "yAxisS2.txt", "zAxisS2.txt", "ResultantS2.txt");
 
 	  	 		  double totalAverage1 = 0.0;
-	  	 		  processAndSaveData("xAxis_sensor1.txt", "xAxis_meanfree_sensor1.txt", buffer, BufferSize, &totalAverage1);
+	  	 		  processAndSaveData("xAxisS1.txt", "xAxisMWFS1.txt", buffer, BufferSize, &totalAverage1);
 	  	 		  double totalAverage2 = 0.0;
-	  	 		  processAndSaveData("yAxis_sensor1.txt", "yAxis_meanfree_sensor1.txt", buffer, BufferSize, &totalAverage2);
+	  	 		  processAndSaveData("yAxisS1.txt", "yAxisMWFS1.txt", buffer, BufferSize, &totalAverage2);
 	  	 		  double totalAverage3 = 0.0;
-	  	 		  processAndSaveData("xAxis_sensor2.txt", "xAxis_meanfree_sensor2.txt", buffer, BufferSize, &totalAverage3);
+	  	 		  processAndSaveData("zAxisS1.txt", "zAxisMWFS1.txt", buffer, BufferSize, &totalAverage3);
 	  	 		  double totalAverage4 = 0.0;
-	  	 		  processAndSaveData("yAxis_sensor2.txt", "yAxis_meanfree_sensor2.txt", buffer, BufferSize, &totalAverage4);
+	  	 		  processAndSaveData("xAxisS2.txt", "xAxisMWFS2.txt", buffer, BufferSize, &totalAverage4);
 	  	 		  double totalAverage5 = 0.0;
-	  	 		  processAndSaveData("Resultant_sensor1.txt", "Resultant_meanfree_sensor1.txt", buffer, BufferSize, &totalAverage5);
+	  	 		  processAndSaveData("yAxisS2.txt", "yAxisMWFS2.txt", buffer, BufferSize, &totalAverage5);
 	  	 		  double totalAverage6 = 0.0;
-	  	 		  processAndSaveData("Resultant_sensor2.txt", "Resultant_meanfree_sensor2.txt", buffer, BufferSize, &totalAverage6);
+	  	 		  processAndSaveData("zAxisS2.txt", "zAxisMWFS2.txt", buffer, BufferSize, &totalAverage6);
+	  	 		  double totalAverage7 = 0.0;
+	  	 		  processAndSaveData("ResultantS1.txt", "ResultantMWFS1.txt", buffer, BufferSize, &totalAverage7);
+	  	 		  double totalAverage8 = 0.0;
+	  	 		  processAndSaveData("ResultantS2.txt", "ResultantMWFS2.txt", buffer, BufferSize, &totalAverage8);
 
 	  	 		  send_uart("Text database created!!\r\n");
 	  	 		  fftFlag=1;
-	  	 	  	  	  }
 
+	  	 	  	  	  }
 	  	 	  if(fftFlag)
 	  	 			{
-	  		   send_uart("Performing FFT on sensor1_X_Axis!\r\n");
-	  		   fftResults("xAxis_meanfree_sensor1.txt", "xAxis_FFT_sensor1.txt", outputfft_mag_xAxis_s1, fftBuffIn, fftBuffOut);
-	  		   send_uart("Performing FFT on sensor1_Y_Axis!\r\n");
-	  		   fftResults("yAxis_meanfree_sensor1.txt", "yAxis_FFT_sensor1.txt", outputfft_mag_yAxis_s1, fftBuffIn, fftBuffOut);
-	  		   send_uart("Performing FFT on sensor1_Resulatnt!\r\n");
-	  		   fftResults("Resultant_meanfree_sensor1.txt", "Resultant_FFT_sensor1.txt", outputfft_mag_R_s1, fftBuffIn, fftBuffOut);
+	  		   send_uart("Performing FFT on X_Axis!\r\n");
+	  		   fftResults("xAxisMWFS1.txt", "xAxisFFTS1.txt", outputfft_mag_xAxis_s1, fftBuffIn, fftBuffOut);
+
+	  		   send_uart("Performing FFT on Y_Axis!\r\n");
+	  		   fftResults("yAxisMWFS1.txt", "yAxisFFTS1.txt", outputfft_mag_yAxis_s1, fftBuffIn, fftBuffOut);
+
+	  		   send_uart("Performing FFT on Z_Axis!\r\n");
+	  		   fftResults("zAxisMWFS1.txt", "zAxisFFTS1.txt", outputfft_mag_zAxis_s1, fftBuffIn, fftBuffOut);
+
+	  		   send_uart("Performing FFT on Resultant!\r\n");
+	  		   fftResults("ResultantMWFS1.txt", "ResultantFFTS1.txt", outputfft_mag_R_s1, fftBuffIn, fftBuffOut);
+
 	  		   send_uart("Performing FFT on sensor2_X_Axis!\r\n");
-	  		   fftResults("xAxis_meanfree_sensor2.txt", "xAxis_FFT_sensor2.txt", outputfft_mag_xAxis_s2, fftBuffIn, fftBuffOut);
+	  		   fftResults("xAxisMWFS2.txt", "xAxisFFTS2.txt", outputfft_mag_xAxis_s2, fftBuffIn, fftBuffOut);
+
 	  		   send_uart("Performing FFT on sensor2_Y_Axis!\r\n");
-	  		   fftResults("yAxis_meanfree_sensor2.txt", "yAxis_FFT_sensor2.txt", outputfft_mag_yAxis_s2, fftBuffIn, fftBuffOut);
+	  		   fftResults("yAxisMWFS2.txt", "yAxisFFTS2.txt", outputfft_mag_yAxis_s2, fftBuffIn, fftBuffOut);
+
+	  		   send_uart("Performing FFT on sensor2_Z_Axis!\r\n");
+	  		   fftResults("zAxisMWFS2.txt", "zAxisFFTS2.txt", outputfft_mag_zAxis_s2, fftBuffIn, fftBuffOut);
+
 	  		   send_uart("Performing FFT on sensor2_Resultant!\r\n");
-	  		   fftResults("Resultant_meanfree_sensor2.txt", "Resultant_FFT_sensor2.txt", outputfft_mag_R_s2, fftBuffIn, fftBuffOut);
+	  		   fftResults("ResultantMWFS2.txt", "ResultantFFTS2.txt", outputfft_mag_R_s2, fftBuffIn, fftBuffOut);
+
+	  		   generate_frequency_difference("ResultantFFTS1.txt", "ResultantFFTS2.txt", "Frequency_Difference.txt");
 	  		   send_uart("Programme Complete!\r\n");
 	  		   break;
 	  	 	  }
@@ -494,12 +632,13 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 70;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 35;
   RCC_OscInitStruct.PLL.PLLP = 2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
@@ -552,15 +691,15 @@ static void MX_ADC1_Init(void)
   /** Common config
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV2;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
   hadc1.Init.Resolution = ADC_RESOLUTION_16B;
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 4;
+  hadc1.Init.NbrOfConversion = 6;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T2_TRGO;
+  hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T3_TRGO;
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
   hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
@@ -583,7 +722,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_15;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_64CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -606,6 +745,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_5;
   sConfig.Rank = ADC_REGULAR_RANK_3;
+  sConfig.SamplingTime = ADC_SAMPLETIME_16CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -615,6 +755,25 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_4;
+  sConfig.SamplingTime = ADC_SAMPLETIME_32CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_11;
+  sConfig.Rank = ADC_REGULAR_RANK_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel
+  */
+  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Rank = ADC_REGULAR_RANK_6;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -674,47 +833,47 @@ static void MX_SPI1_Init(void)
 }
 
 /**
-  * @brief TIM2 Initialization Function
+  * @brief TIM3 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM2_Init(void)
+static void MX_TIM3_Init(void)
 {
 
-  /* USER CODE BEGIN TIM2_Init 0 */
+  /* USER CODE BEGIN TIM3_Init 0 */
 
-  /* USER CODE END TIM2_Init 0 */
+  /* USER CODE END TIM3_Init 0 */
 
   TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN TIM2_Init 1 */
+  /* USER CODE BEGIN TIM3_Init 1 */
 
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 280-1;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 2000-1;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 280-1;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 1000-1;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
   sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
   {
     Error_Handler();
   }
   sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
   sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM2_Init 2 */
+  /* USER CODE BEGIN TIM3_Init 2 */
 
-  /* USER CODE END TIM2_Init 2 */
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -800,9 +959,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_12, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : SD_CS_Pin */
   GPIO_InitStruct.Pin = SD_CS_Pin;
@@ -810,6 +973,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
   HAL_GPIO_Init(SD_CS_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PG12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
